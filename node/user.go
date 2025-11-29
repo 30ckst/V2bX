@@ -15,7 +15,7 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
 				"err": err,
-			}).Info("Report user traffic failed")
+			}).Warn("Report user traffic failed")
 		} else {
 			log.WithField("tag", c.tag).Infof("Report %d users traffic", len(userTraffic))
 			log.WithField("tag", c.tag).Debugf("User traffic: %+v", userTraffic)
@@ -23,60 +23,80 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 	}
 
 	if onlineDevice, err := c.limiter.GetOnlineDevice(); err != nil {
-		log.Print(err)
+		log.WithFields(log.Fields{
+			"tag": c.tag,
+			"err": err,
+		}).Warn("Failed to get online device list")
 	} else if len(*onlineDevice) > 0 {
-		// Only report user has traffic > 100kb to allow ping test
+		// Only report user has traffic > min traffic to allow ping test
 		var result []panel.OnlineUser
 		var nocountUID = make(map[int]struct{})
+
+		// Identify users with low traffic
 		for _, traffic := range userTraffic {
 			total := traffic.Upload + traffic.Download
-			if total < int64(c.Options.DeviceOnlineMinTraffic*1000) {
+			minTraffic := int64(c.Options.DeviceOnlineMinTraffic * 1000)
+			if total < minTraffic {
 				nocountUID[traffic.UID] = struct{}{}
 			}
 		}
+
+		// Filter online users
 		for _, online := range *onlineDevice {
 			if _, ok := nocountUID[online.UID]; !ok {
 				result = append(result, online)
 			}
 		}
+
+		// Prepare data for reporting
 		data := make(map[int][]string)
 		for _, onlineuser := range result {
 			// json structure: { UID1:["ip1","ip2"],UID2:["ip3","ip4"] }
 			data[onlineuser.UID] = append(data[onlineuser.UID], onlineuser.IP)
 		}
-		if err = c.apiClient.ReportNodeOnlineUsers(&data); err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Info("Report online users failed")
-		} else {
-			log.WithField("tag", c.tag).Infof("Total %d online users, %d Reported", len(*onlineDevice), len(result))
-			log.WithField("tag", c.tag).Debugf("Online users: %+v", data)
+
+		if len(data) > 0 {
+			if err = c.apiClient.ReportNodeOnlineUsers(&data); err != nil {
+				log.WithFields(log.Fields{
+					"tag": c.tag,
+					"err": err,
+				}).Warn("Report online users failed")
+			} else {
+				log.WithField("tag", c.tag).Infof("Total %d online users, %d reported", len(*onlineDevice), len(result))
+				log.WithField("tag", c.tag).Debugf("Online users: %+v", data)
+			}
 		}
 	}
 
+	// Explicitly set to nil to help GC
 	userTraffic = nil
 	return nil
 }
 
 func compareUserList(old, new []panel.UserInfo) (deleted, added []panel.UserInfo) {
-	oldMap := make(map[string]int)
-	for i, user := range old {
+	// Create a map for fast lookup of old users
+	oldMap := make(map[string]panel.UserInfo)
+	for _, user := range old {
 		key := user.Uuid + strconv.Itoa(user.SpeedLimit)
-		oldMap[key] = i
+		oldMap[key] = user
 	}
 
+	// Check for added or unchanged users
+	newMap := make(map[string]panel.UserInfo)
 	for _, user := range new {
 		key := user.Uuid + strconv.Itoa(user.SpeedLimit)
+		newMap[key] = user
+
 		if _, exists := oldMap[key]; !exists {
 			added = append(added, user)
-		} else {
-			delete(oldMap, key)
 		}
 	}
 
-	for _, index := range oldMap {
-		deleted = append(deleted, old[index])
+	// Check for deleted users
+	for key, user := range oldMap {
+		if _, exists := newMap[key]; !exists {
+			deleted = append(deleted, user)
+		}
 	}
 
 	return deleted, added

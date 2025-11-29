@@ -1,0 +1,89 @@
+name: Daily Build and Test
+
+on:
+  schedule:
+    # 每天UTC时间0点运行（北京时间早上8点）
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: [1.21, 1.22]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+      
+      - name: Get dependencies
+        run: |
+          go mod tidy
+      
+      - name: Build
+        run: |
+          go build -v ./...
+      
+      - name: Run tests
+        run: |
+          go test -v ./...
+      
+      - name: Create test report
+        if: failure()
+        run: |
+          echo "Build or tests failed. Please check the logs for details." > test-report.txt
+          echo "Go version: ${{ matrix.go-version }}" >> test-report.txt
+          echo "Commit: ${{ github.sha }}" >> test-report.txt
+          
+      - name: Upload artifact on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-failure-report-${{ matrix.go-version }}
+          path: test-report.txt
+
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: success()
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/v2bx-daily
+          tags: |
+            type=schedule
+            type=raw,value=daily-${{ github.sha }}
+          
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

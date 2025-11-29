@@ -20,17 +20,17 @@ func NewSelector(c []conf.CoreConfig) (Core, error) {
 	for _, t := range c {
 		f, ok := cores[strings.ToLower(t.Type)]
 		if !ok {
-			return nil, errors.New("unknown core type: " + t.Type)
+			return nil, fmt.Errorf("unknown core type: %s", t.Type)
 		}
 		core1, err := f(&t)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to initialize %s core: %w", t.Type, err)
 		}
-		if t.Name == "" {
-			cs[t.Type] = core1
-		} else {
-			cs[t.Name] = core1
+		name := t.Type
+		if t.Name != "" {
+			name = t.Name
 		}
+		cs[name] = core1
 	}
 	return &Selector{
 		cores: cs,
@@ -38,10 +38,10 @@ func NewSelector(c []conf.CoreConfig) (Core, error) {
 }
 
 func (s *Selector) Start() error {
-	for i := range s.cores {
-		err := s.cores[i].Start()
+	for name, core := range s.cores {
+		err := core.Start()
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to start %s core: %w", name, err)
 		}
 	}
 	return nil
@@ -49,17 +49,17 @@ func (s *Selector) Start() error {
 
 func (s *Selector) Close() error {
 	var errs []error
-	for i := range s.cores {
-		if err := s.cores[i].Close(); err != nil {
-			errs = append(errs, err)
+	for name, core := range s.cores {
+		if err := core.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to close %s core: %w", name, err))
 		}
 	}
 	return errors.Join(errs...)
 }
 
 func isSupported(protocol string, protocols []string) bool {
-	for i := range protocols {
-		if protocol == protocols[i] {
+	for _, p := range protocols {
+		if protocol == p {
 			return true
 		}
 	}
@@ -68,35 +68,43 @@ func isSupported(protocol string, protocols []string) bool {
 
 func (s *Selector) AddNode(tag string, info *panel.NodeInfo, option *conf.Options) error {
 	var core Core
-	if len(option.CoreName) > 0 {
+
+	// Select core based on configuration
+	if option.CoreName != "" {
 		// use name to select core
-		if c, ok := s.cores[option.CoreName]; ok {
-			core = c
+		c, ok := s.cores[option.CoreName]
+		if !ok {
+			return fmt.Errorf("specified core name '%s' not found", option.CoreName)
 		}
+		core = c
 	} else {
 		// use type to select core
 		for _, c := range s.cores {
-			if len(option.Core) == 0 {
-				if !isSupported(info.Type, c.Protocols()) {
-					continue
+			// If no specific core is required or core type matches
+			if option.Core == "" || option.Core == c.Type() {
+				// Check if protocol is supported
+				if isSupported(info.Type, c.Protocols()) {
+					core = c
+					break
 				}
-			} else if option.Core != c.Type() {
-				continue
 			}
-			core = c
 		}
 	}
+
 	if core == nil {
-		return errors.New("the node type is not support")
+		return errors.New("no suitable core found for the node type")
 	}
-	if len(option.Core) == 0 {
+
+	// Process core-specific options
+	if option.Core == "" {
 		option.Core = core.Type()
 		err := option.UnmarshalJSON(option.RawOptions)
 		if err != nil {
-			return fmt.Errorf("unmarshal option error: %s", err)
+			return fmt.Errorf("unmarshal option error: %w", err)
 		}
 		option.RawOptions = nil
 	}
+
 	err := core.AddNode(tag, info, option)
 	if err != nil {
 		return err
@@ -106,63 +114,71 @@ func (s *Selector) AddNode(tag string, info *panel.NodeInfo, option *conf.Option
 }
 
 func (s *Selector) DelNode(tag string) error {
-	if t, e := s.nodes.Load(tag); e {
-		err := t.(Core).DelNode(tag)
-		if err != nil {
-			return err
-		}
-		s.nodes.Delete(tag)
-		return nil
+	t, ok := s.nodes.Load(tag)
+	if !ok {
+		return errors.New("node not found")
 	}
-	return errors.New("the node is not have")
+
+	err := t.(Core).DelNode(tag)
+	if err != nil {
+		return err
+	}
+	s.nodes.Delete(tag)
+	return nil
 }
 
 func (s *Selector) AddUsers(p *AddUsersParams) (added int, err error) {
-	t, e := s.nodes.Load(p.Tag)
-	if !e {
-		return 0, errors.New("the node is not have")
+	t, ok := s.nodes.Load(p.Tag)
+	if !ok {
+		return 0, errors.New("node not found")
 	}
 	return t.(Core).AddUsers(p)
 }
 
 func (s *Selector) GetUserTrafficSlice(tag string, reset bool) ([]panel.UserTraffic, error) {
-	t, e := s.nodes.Load(tag)
-	if !e {
-		return nil, errors.New("the node is not have")
+	t, ok := s.nodes.Load(tag)
+	if !ok {
+		return nil, errors.New("node not found")
 	}
 	return t.(Core).GetUserTrafficSlice(tag, reset)
 }
 
 func (s *Selector) DelUsers(users []panel.UserInfo, tag string, info *panel.NodeInfo) error {
-	t, e := s.nodes.Load(tag)
-	if !e {
-		return errors.New("the node is not have")
+	t, ok := s.nodes.Load(tag)
+	if !ok {
+		return errors.New("node not found")
 	}
 	return t.(Core).DelUsers(users, tag, info)
 }
 
 func (s *Selector) Protocols() []string {
 	protocols := make([]string, 0)
-	for i := range s.cores {
-		protocols = append(protocols, s.cores[i].Protocols()...)
+	seen := make(map[string]bool) // Prevent duplicates
+
+	for _, core := range s.cores {
+		for _, p := range core.Protocols() {
+			if !seen[p] {
+				protocols = append(protocols, p)
+				seen[p] = true
+			}
+		}
 	}
 	return protocols
 }
 
 func (s *Selector) Type() string {
 	t := "Selector("
-	var flag bool
-	for n, c := range s.cores {
-		if flag {
+	names := make([]string, 0, len(s.cores))
+
+	for name := range s.cores {
+		names = append(names, name)
+	}
+
+	for i, name := range names {
+		if i > 0 {
 			t += " "
-		} else {
-			flag = true
 		}
-		if len(n) == 0 {
-			t += c.Type()
-		} else {
-			t += n
-		}
+		t += name
 	}
 	t += ")"
 	return t

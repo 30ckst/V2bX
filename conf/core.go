@@ -2,6 +2,7 @@ package conf
 
 import (
 	"encoding/json"
+	"fmt"
 )
 
 type CoreConfig struct {
@@ -17,18 +18,23 @@ type _CoreConfig CoreConfig
 func (c *CoreConfig) UnmarshalJSON(b []byte) error {
 	err := json.Unmarshal(b, (*_CoreConfig)(c))
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to unmarshal core config: %w", err)
 	}
+
+	// Pre-initialize configs to avoid nil pointer dereference
+	c.XrayConfig = NewXrayConfig()
+	c.SingConfig = NewSingConfig()
+	c.Hysteria2Config = NewHysteria2Config()
+
 	switch c.Type {
 	case "xray":
-		c.XrayConfig = NewXrayConfig()
 		return json.Unmarshal(b, c.XrayConfig)
 	case "sing":
-		c.SingConfig = NewSingConfig()
 		return json.Unmarshal(b, c.SingConfig)
 	case "hysteria2":
-		c.Hysteria2Config = NewHysteria2Config()
 		return json.Unmarshal(b, c.Hysteria2Config)
+	default:
+		// For unknown types, we don't error out but leave configs as default
+		return nil
 	}
-	return nil
 }
